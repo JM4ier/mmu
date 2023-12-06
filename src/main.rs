@@ -419,7 +419,7 @@ impl Machine {
 
         cache_set[k].valid = true;
         cache_set[k].tag = tag;
-        cache_set[k] = self.memory.read(block_addr);
+        cache_set[k].line = self.memory.read(block_addr);
 
         cache_set[k].line[offset]
     }
