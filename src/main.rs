@@ -10,6 +10,14 @@ impl Display for PhysAddr {
         write!(f, "P0x{:x}", self.0)
     }
 }
+impl PhysAddr {
+    pub const fn frame_offset(self) -> usize {
+        self.0 as usize & 4095
+    }
+    pub const fn frame_number(self) -> u64 {
+        self.0 >> 12
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct VirtAddr(u64);
@@ -60,10 +68,16 @@ impl PageTableEntry {
             bits: target.0 & 0x000FFFFFFFFFFFF000 | 1,
         }
     }
-    pub fn is_present(self) -> bool {
+
+    pub const fn new_unmapped() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub const fn is_present(self) -> bool {
         self.bits & 1 > 0
     }
-    pub fn phys_addr(self) -> PhysAddr {
+
+    pub const fn phys_addr(self) -> PhysAddr {
         PhysAddr(self.bits & 0x000FFFFFFFFFFFF000)
     }
 }
@@ -94,6 +108,18 @@ pub struct L1dCacheEntry {
 #[derive(Copy, Clone)]
 pub struct L1dCacheSet {
     entries: [L1dCacheEntry; 8],
+}
+impl Index<usize> for L1dCacheSet {
+    type Output = L1dCacheEntry;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.entries[index]
+    }
+}
+impl IndexMut<usize> for L1dCacheSet {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.entries[index]
+    }
 }
 
 pub struct L1dCache {
@@ -209,27 +235,97 @@ impl Tlb {
     }
 }
 
+impl Display for Tlb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut empty = true;
+
+        for set in self.sets {
+            if set.iter().any(|e| e.valid) {
+                for entry in set.iter() {
+                    if entry.valid {
+                        empty = false;
+                        write!(
+                            f,
+                            "[{} -> {}, {}] ",
+                            VirtAddr(entry.tag),
+                            entry.addr,
+                            entry.access
+                        )?;
+                    }
+                }
+                write!(f, "\n")?;
+            }
+        }
+
+        if empty {
+            write!(f, "(empty)")?;
+        }
+        Ok(())
+    }
+}
+
+pub struct CacheStats {
+    hit: usize,
+    miss: usize,
+}
+impl CacheStats {
+    fn new() -> Self {
+        Self { hit: 0, miss: 0 }
+    }
+    fn hit(&mut self) {
+        self.hit += 1;
+    }
+    fn miss(&mut self) {
+        self.miss += 1;
+    }
+}
+
+pub struct Stats {
+    page_faults: usize,
+    l1: CacheStats,
+    tlb: CacheStats,
+}
+impl Stats {
+    fn new() -> Self {
+        Self {
+            page_faults: 0,
+            l1: CacheStats::new(),
+            tlb: CacheStats::new(),
+        }
+    }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 pub struct Machine {
     cr3: PhysAddr,
     tlb: Tlb,
     memory: Memory,
     cache: L1dCache,
+    stats: Stats,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct PageFault;
 
 impl Machine {
     pub fn translate(&mut self, virt_addr: VirtAddr) -> Result<PhysAddr, PageFault> {
         let tlb_index = virt_addr.virtual_page_number() & 127;
-        let tlb_tag = virt_addr.virtual_page_number() >> 7;
+        let tlb_tag = (virt_addr.virtual_page_number() >> 7) << 7;
         let tlb_set = &mut self.tlb[tlb_index];
 
         for i in 0..4 {
             if tlb_set[i].tag == tlb_tag && tlb_set[i].valid {
                 tlb_set[i].mark_accessed();
+                self.stats.tlb.hit();
                 return Ok(tlb_set[i].addr);
             }
         }
+
+        self.stats.tlb.miss();
+
+        self.stats.page_faults += 1;
 
         let addr1 = self.cr3;
         let page_table_1 = self.memory.read::<PageTable>(addr1);
@@ -259,6 +355,8 @@ impl Machine {
             return Err(PageFault);
         }
 
+        self.stats.page_faults -= 1;
+
         let phys_addr = pte4.phys_addr();
 
         let mut k = 0;
@@ -284,8 +382,52 @@ impl Machine {
         tlb_set[k].valid = true;
         tlb_set[k].addr = phys_addr;
         tlb_set[k].tag = tlb_tag;
+        tlb_set[k].mark_accessed();
 
         Ok(phys_addr)
+    }
+
+    pub fn read_phys(&mut self, addr: PhysAddr) -> u8 {
+        let offset = addr.frame_offset() & 63;
+        let index = (addr.frame_offset() >> 6) & 63;
+        let tag = addr.frame_number();
+
+        let cache_set = &mut self.cache.entries[index];
+
+        // cache associativity (imagine this happens in parallel)
+        for i in 0..8 {
+            if cache_set[i].valid && cache_set[i].tag == tag {
+                self.stats.l1.hit();
+                return cache_set[i].line[offset];
+            }
+        }
+
+        self.stats.l1.miss();
+
+        // none is the value we need
+        // --> evict some entry
+        // TODO: better eviction strategy
+
+        let mut k = 0;
+        for i in 0..8 {
+            if !cache_set[i].valid {
+                k = i;
+            }
+        }
+
+        let block_addr = PhysAddr(addr.0 & !63);
+
+        cache_set[k].valid = true;
+        cache_set[k].tag = tag;
+        cache_set[k] = self.memory.read(block_addr);
+
+        cache_set[k].line[offset]
+    }
+
+    pub fn read(&mut self, addr: VirtAddr) -> Result<u8, PageFault> {
+        let phys_addr = self.translate(addr)?;
+        let byte = self.read_phys(phys_addr);
+        Ok(byte)
     }
 
     pub fn map_page(
@@ -296,6 +438,12 @@ impl Machine {
     ) {
         let table = self.memory.mutate::<PageTable>(table_location);
         table[table_entry] = PageTableEntry::new_present(target_frame);
+        self.tlb.invalidate();
+    }
+
+    pub fn unmap_page(&mut self, table_location: PhysAddr, table_entry: usize) {
+        let table = self.memory.mutate::<PageTable>(table_location);
+        table[table_entry] = PageTableEntry::new_unmapped();
         self.tlb.invalidate();
     }
 }
@@ -325,12 +473,107 @@ impl Machine {
             let virt = virt_base + stride * i as u64;
             let phys = entry.phys_addr();
             if depth == 4 {
-                *buf += &(format!("{indent}{i:03}: {virt} --> {phys}\n"));
+                *buf += &(format!("{indent}{i:03}: {virt} -> {phys}\n"));
             } else {
                 let x = self.num_mapped_entries(phys);
                 *buf += &format!("{indent}{i:03}: [{x} mapped entries]\n");
                 self.page_map_rec(buf, depth + 1, phys, virt);
             }
+        }
+    }
+}
+
+impl Machine {
+    fn stats(&self) -> String {
+        format!(
+            "TLB hits:    {}\nTLB misses:  {}\nL1 hits:     {}\nL1 misses:   {}\nPage Faults: {}",
+            self.stats.tlb.hit,
+            self.stats.tlb.miss,
+            self.stats.l1.hit,
+            self.stats.l1.miss,
+            self.stats.page_faults
+        )
+    }
+    fn dump_stats(&mut self) {
+        println!("{}", boxed("Pages", &self.page_map()));
+        println!("{}", boxed("TLB", &format!("{}", self.tlb)));
+        println!("{}", boxed("Stats", &self.stats()));
+        self.stats.reset();
+    }
+}
+
+fn boxed(title: &str, content: &str) -> String {
+    let lines: Vec<_> = content.lines().collect();
+    let width = lines
+        .iter()
+        .map(|l| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(4 + title.len());
+    let mut buf = String::new();
+
+    let width = width + 1;
+
+    buf += "╭─";
+    buf += title;
+    for _ in 0..(width - title.len()) {
+        buf += "─";
+    }
+    buf += "╮\n";
+
+    for line in lines {
+        buf += "│ ";
+        buf += line;
+        for _ in 0..(width - line.len()) {
+            buf += " ";
+        }
+        buf += "│\n";
+    }
+    buf += "╰";
+    for _ in 0..=width {
+        buf += "─";
+    }
+    buf += "╯\n";
+
+    buf
+}
+
+#[derive(Copy, Clone)]
+pub enum Action {
+    Map {
+        table: PhysAddr,
+        index: usize,
+        target: PhysAddr,
+    },
+    UnMap {
+        table: PhysAddr,
+        index: usize,
+    },
+    Read(VirtAddr),
+    DumpStats,
+}
+impl Machine {
+    pub fn run_one(&mut self, action: Action) {
+        match action {
+            Action::Map {
+                table,
+                index,
+                target,
+            } => {
+                self.map_page(table, index, target);
+            }
+            Action::UnMap { table, index } => self.unmap_page(table, index),
+            Action::Read(addr) => {
+                self.read(addr);
+            }
+            Action::DumpStats => {
+                self.dump_stats();
+            }
+        }
+    }
+    pub fn run_many(&mut self, actions: &[Action]) {
+        for action in actions {
+            self.run_one(*action);
         }
     }
 }
@@ -347,6 +590,7 @@ fn main() {
         tlb: Tlb::empty(),
         memory: Memory::megabytes(200),
         cache: L1dCache::empty(),
+        stats: Stats::new(),
     };
 
     let p1 = next_page();
@@ -356,17 +600,55 @@ fn main() {
     let p5 = next_page();
     let p6 = next_page();
 
-    mmu.map_page(mmu.cr3, 10, p1);
-    mmu.map_page(p1, 0, p2);
+    use Action::*;
+    let actions = [
+        Map {
+            table: mmu.cr3,
+            index: 10,
+            target: p1,
+        },
+        Map {
+            table: p1,
+            index: 0,
+            target: p2,
+        },
+        // we map p2[0] and p2[1] to p3 to simulate homonyms
+        Map {
+            table: p2,
+            index: 0,
+            target: p3,
+        },
+        Map {
+            table: p2,
+            index: 1,
+            target: p3,
+        },
+        Map {
+            table: p3,
+            index: 0,
+            target: p4,
+        },
+        Map {
+            table: p3,
+            index: 1,
+            target: p5,
+        },
+        Map {
+            table: p3,
+            index: 2,
+            target: p6,
+        },
+        Map {
+            table: mmu.cr3,
+            index: 24,
+            target: next_page(),
+        },
+        Read(VirtAddr(0x50000000000)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        DumpStats,
+    ];
 
-    // mapping both p2.0 --> p3 and p2.1 --> p3 (homonyms)
-    mmu.map_page(p2, 0, p3);
-    mmu.map_page(p2, 1, p3);
-
-    mmu.map_page(p3, 0, p4);
-    mmu.map_page(p3, 1, p5);
-    mmu.map_page(p3, 2, p6);
-    mmu.map_page(mmu.cr3, 24, next_page());
-
-    println!("{}", mmu.page_map());
+    mmu.run_many(&actions);
 }
