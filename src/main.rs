@@ -358,7 +358,11 @@ fn main() {
 
     mmu.map_page(mmu.cr3, 10, p1);
     mmu.map_page(p1, 0, p2);
+
+    // mapping both p2.0 --> p3 and p2.1 --> p3 (homonyms)
     mmu.map_page(p2, 0, p3);
+    mmu.map_page(p2, 1, p3);
+
     mmu.map_page(p3, 0, p4);
     mmu.map_page(p3, 1, p5);
     mmu.map_page(p3, 2, p6);
