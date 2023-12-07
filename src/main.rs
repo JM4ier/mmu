@@ -164,8 +164,6 @@ impl Machine {
         self.stats.tlb.miss();
         self.log.log("TLB Miss");
 
-        self.stats.page_faults += 1;
-
         let addr1 = self.cr3;
         let page_table_1 = self.memory.read::<PageTable>(addr1);
         let pte1 = page_table_1[virt_addr.vpn1()];
@@ -193,8 +191,6 @@ impl Machine {
         if !pte4.is_present() {
             return Err(PageFault);
         }
-
-        self.stats.page_faults -= 1;
 
         let phys_addr = pte4.phys_addr();
 
@@ -292,6 +288,7 @@ impl Machine {
             self.log.end_context();
             Ok(byte)
         } else {
+            self.stats.page_faults += 1;
             self.log.log("Page Fault.");
             self.log.end_context();
             Err(PageFault)
