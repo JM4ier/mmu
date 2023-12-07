@@ -285,19 +285,28 @@ impl Machine {
         self.log.log(format!("Memory Access at {addr}"));
         self.log.begin_context();
 
-        let phys_addr = self.translate(addr)?;
-        self.log.log(format!("Found physical address {phys_addr}"));
+        if let Ok(phys_addr) = self.translate(addr) {
+            self.log.log(format!("Found physical address {phys_addr}"));
 
-        let byte = self.read_phys(phys_addr);
-
-        self.log.end_context();
-        Ok(byte)
+            let byte = self.read_phys(phys_addr);
+            self.log.end_context();
+            Ok(byte)
+        } else {
+            self.log.log("Page Fault.");
+            self.log.end_context();
+            Err(PageFault)
+        }
     }
 
     /// remove all TLB entries
     pub fn invalidate_tlb(&mut self) {
         self.log.log("Invalidate TLB");
         self.tlb = Tlb::empty();
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.log.log("Invalidate Cache");
+        self.cache = L1dCache::empty();
     }
 
     /// Adds a new mapping to the page table at the given location
@@ -372,9 +381,7 @@ impl Machine {
             }
             Action::UnMap { table, index } => self.unmap_page(table, index),
             Action::Read(addr) => {
-                if self.read(addr).is_err() {
-                    self.log.log(format!("Page Fault while accessing {addr}"));
-                }
+                let _ = self.read(addr);
             }
             Action::DumpStats => {
                 self.dump_stats();
@@ -408,128 +415,36 @@ fn main() {
     let p1 = next_page();
     let p2 = next_page();
     let p3 = next_page();
-    let p4 = next_page();
-    let p5 = next_page();
-    let p6 = next_page();
-    let p7 = next_page();
-    let p8 = next_page();
-    let p9 = next_page();
 
-    use Action::*;
-    let actions = [
-        Map {
-            table: mmu.cr3,
-            index: 10,
-            target: p1,
-        },
-        Map {
-            table: p1,
-            index: 0,
-            target: p2,
-        },
-        // we map p2[0] and p2[1] to p3 to simulate homonyms
-        Map {
-            table: p2,
-            index: 0,
-            target: p3,
-        },
-        Map {
-            table: p2,
-            index: 1,
-            target: p3,
-        },
-        Map {
-            table: p3,
-            index: 0,
-            target: p4,
-        },
-        Map {
-            table: p3,
-            index: 1,
-            target: p5,
-        },
-        Map {
-            table: p3,
-            index: 2,
-            target: p6,
-        },
-        Map {
-            table: mmu.cr3,
-            index: 32,
-            target: p7,
-        },
-        Map {
-            table: p7,
-            index: 0,
-            target: p8,
-        },
-        Map {
-            table: p8,
-            index: 0,
-            target: p9,
-        },
-        Map {
-            table: p9,
-            index: 200,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 201,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 202,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 203,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 204,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 205,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 206,
-            target: next_page(),
-        },
-        Map {
-            table: p9,
-            index: 207,
-            target: next_page(),
-        },
-        InvalidateTlb,
-        Read(VirtAddr::from_bits(0x50000000000)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x50000202200)),
-        Read(VirtAddr::from_bits(0x1000000c8000)),
-        Read(VirtAddr::from_bits(0x1000000c8000 + 64)),
-        Read(VirtAddr::from_bits(0x1000000c8000 + 2 * 64)),
-        Read(VirtAddr::from_bits(0x1000000c8100)),
-        Read(VirtAddr::from_bits(0x1000000c8200)),
-        Read(VirtAddr::from_bits(0x1000000c9000)),
-        Read(VirtAddr::from_bits(0x1000000ca000)),
-        Read(VirtAddr::from_bits(0x1000000cb000)),
-        Read(VirtAddr::from_bits(0x1000000cc000)),
-        Read(VirtAddr::from_bits(0x1000000cd000)),
-        Read(VirtAddr::from_bits(0x1000000ce000)),
-        Read(VirtAddr::from_bits(0x1000000cf000)),
-        DumpStats,
-    ];
+    mmu.map_page(mmu.cr3, 10, p1);
+    mmu.map_page(p1, 0, p2);
 
-    mmu.run_many(&actions);
+    // mapping the same page twice to see what happens with homonyms
+    mmu.map_page(p2, 0, p3);
+    mmu.map_page(p2, 1, p3);
+
+    for i in 0..10 {
+        mmu.map_page(p3, i, next_page());
+    }
+
+    mmu.invalidate_tlb();
+
+    let addr = VirtAddr::from_bits(0x50000200000);
+
+    // consecutive accesses should be very good for cache & TLB
+    for i in 0..100 {
+        mmu.read(addr + i).ok();
+    }
+
+    mmu.dump_stats();
+
+    mmu.invalidate_tlb();
+    mmu.invalidate_cache();
+
+    // accesses with stride 64 should be rather bad for the cache...
+    for i in 0..100 {
+        mmu.read(addr + 64 * i).ok();
+    }
+
+    mmu.dump_stats();
 }
