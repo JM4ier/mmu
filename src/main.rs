@@ -398,13 +398,13 @@ impl Machine {
 
 fn main() {
     let mut allocator = 99;
-    let mut next_page = || {
+    let mut next_frame = || {
         allocator += 1;
         PhysAddr::from_bits(4096 * allocator)
     };
 
     let mut mmu = Machine {
-        cr3: next_page(),
+        cr3: next_frame(),
         tlb: Tlb::empty(),
         memory: Memory::megabytes(200),
         cache: L1dCache::empty(),
@@ -412,19 +412,19 @@ fn main() {
         log: Log::new(),
     };
 
-    let p1 = next_page();
-    let p2 = next_page();
-    let p3 = next_page();
+    let f1 = next_frame();
+    let f2 = next_frame();
+    let f3 = next_frame();
 
-    mmu.map_page(mmu.cr3, 10, p1);
-    mmu.map_page(p1, 0, p2);
+    mmu.map_page(mmu.cr3, 10, f1);
+    mmu.map_page(f1, 0, f2);
 
     // mapping the same page twice to see what happens with homonyms
-    mmu.map_page(p2, 0, p3);
-    mmu.map_page(p2, 1, p3);
+    mmu.map_page(f2, 0, f3);
+    mmu.map_page(f2, 1, f3);
 
     for i in 0..10 {
-        mmu.map_page(p3, i, next_page());
+        mmu.map_page(f3, i, next_frame());
     }
 
     mmu.invalidate_tlb();
