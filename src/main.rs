@@ -5,6 +5,7 @@ use std::{
 
 pub mod addr;
 use addr::{PhysAddr, VirtAddr};
+pub mod cli;
 
 #[derive(Copy, Clone)]
 pub struct PageTableEntry {
@@ -531,49 +532,12 @@ impl Machine {
         )
     }
     fn dump_stats(&mut self) {
-        println!("{}", boxed("Pages", &self.page_map()));
-        println!("{}", boxed("TLB", &self.tlb));
-        println!("{}", boxed("L1-Cache", &self.cache));
-        println!("{}", boxed("Stats", &self.stats()));
+        cli::print_box("Pages", self.page_map());
+        cli::print_box("TLB", &self.tlb);
+        cli::print_box("L1-Cache", &self.cache);
+        cli::print_box("Stats", self.stats());
         self.stats.reset();
     }
-}
-
-fn boxed(title: &str, content: impl Display) -> String {
-    let content = format!("{}", content);
-    let lines: Vec<_> = content.lines().collect();
-    let width = lines
-        .iter()
-        .map(|l| l.len())
-        .max()
-        .unwrap_or(0)
-        .max(4 + title.len());
-    let mut buf = String::new();
-
-    let width = width + 1;
-
-    buf += "╭─";
-    buf += title;
-    for _ in 0..(width - title.len()) {
-        buf += "─";
-    }
-    buf += "╮\n";
-
-    for line in lines {
-        buf += "│ ";
-        buf += line;
-        for _ in 0..(width - line.len()) {
-            buf += " ";
-        }
-        buf += "│\n";
-    }
-    buf += "╰";
-    for _ in 0..=width {
-        buf += "─";
-    }
-    buf += "╯";
-
-    buf
 }
 
 #[derive(Copy, Clone)]
