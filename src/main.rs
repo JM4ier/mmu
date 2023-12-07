@@ -1,69 +1,10 @@
 use std::{
-    fmt::{format, write, Display},
+    fmt::Display,
     ops::{Add, Deref, DerefMut, Index, IndexMut},
 };
 
-#[derive(Copy, Clone)]
-pub struct PhysAddr(u64);
-impl Display for PhysAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "P0x{:x}", self.0)
-    }
-}
-impl PhysAddr {
-    pub fn from_frame_offset(frame: u64, offset: u64) -> Self {
-        Self((frame << 12) | offset)
-    }
-    pub fn with_offset(mut self, offset: u64) -> Self {
-        self.0 &= !4095;
-        self.0 |= offset & 4095;
-        self
-    }
-    pub const fn frame_offset(self) -> usize {
-        self.0 as usize & 4095
-    }
-    pub const fn frame_number(self) -> u64 {
-        self.0 >> 12
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct VirtAddr(u64);
-impl Display for VirtAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "V0x{:x}", self.0)
-    }
-}
-
-impl Add<u64> for VirtAddr {
-    type Output = VirtAddr;
-
-    fn add(mut self, rhs: u64) -> Self::Output {
-        self.0 += rhs;
-        self
-    }
-}
-
-impl VirtAddr {
-    pub const fn page_offset(self) -> u64 {
-        self.0 & 4095
-    }
-    pub const fn virtual_page_number(self) -> u64 {
-        self.0 >> 12
-    }
-    pub const fn vpn1(self) -> usize {
-        ((self.0 >> 39) & 511) as usize
-    }
-    pub const fn vpn2(self) -> usize {
-        ((self.0 >> 30) & 511) as usize
-    }
-    pub const fn vpn3(self) -> usize {
-        ((self.0 >> 21) & 511) as usize
-    }
-    pub const fn vpn4(self) -> usize {
-        ((self.0 >> 12) & 511) as usize
-    }
-}
+pub mod addr;
+use addr::{PhysAddr, VirtAddr};
 
 #[derive(Copy, Clone)]
 pub struct PageTableEntry {
@@ -73,7 +14,7 @@ pub struct PageTableEntry {
 impl PageTableEntry {
     pub const fn new_present(target: PhysAddr) -> Self {
         Self {
-            bits: target.0 & 0x000FFFFFFFFFFFF000 | 1,
+            bits: target.bits() & 0x000FFFFFFFFFFFF000 | 1,
         }
     }
 
@@ -86,7 +27,7 @@ impl PageTableEntry {
     }
 
     pub const fn phys_addr(self) -> PhysAddr {
-        PhysAddr(self.bits & 0x000FFFFFFFFFFFF000)
+        PhysAddr::from_bits(self.bits & 0x000FFFFFFFFFFFF000)
     }
 }
 
@@ -193,7 +134,7 @@ impl Memory {
         }
     }
     fn read<T: Copy>(&self, addr: PhysAddr) -> T {
-        let a = addr.0 as usize;
+        let a = addr.bits() as usize;
         let len = core::mem::size_of::<T>();
 
         if a + len > self.memory.len() {
@@ -205,7 +146,7 @@ impl Memory {
         unsafe { *addr }
     }
     fn mutate<T>(&mut self, addr: PhysAddr) -> &mut T {
-        let a = addr.0 as usize;
+        let a = addr.bits() as usize;
         let len = core::mem::size_of::<T>();
 
         if a + len > self.memory.len() {
@@ -234,7 +175,7 @@ impl TlbEntry {
             valid: false,
             access: 0,
             tag: 0,
-            addr: PhysAddr(0),
+            addr: PhysAddr::from_bits(0),
         }
     }
 }
@@ -284,7 +225,7 @@ impl Display for Tlb {
                         write!(
                             f,
                             "[{} -> {}, {}]",
-                            VirtAddr(virt),
+                            VirtAddr::from_bits(virt),
                             entry.addr,
                             entry.access
                         )?;
@@ -444,7 +385,7 @@ impl Machine {
         }
 
         if tlb_set[k].valid {
-            let evicted = VirtAddr((tlb_set[k].tag | tlb_index) << 12);
+            let evicted = VirtAddr::from_bits((tlb_set[k].tag | tlb_index) << 12);
             self.log.log(format!("Evicting TLB Entry {evicted}"));
         }
 
@@ -490,11 +431,11 @@ impl Machine {
         }
 
         if cache_set[k].valid {
-            let evicted = PhysAddr(cache_set[k].tag << 12 | (index as u64) << 6);
+            let evicted = PhysAddr::from_bits(cache_set[k].tag << 12 | (index as u64) << 6);
             self.log.log(format!("Evicting L1 Entry: {evicted}"));
         }
 
-        let block_addr = PhysAddr(addr.0 & !63);
+        let block_addr = addr & !63;
 
         cache_set[k].valid = true;
         cache_set[k].tag = tag;
@@ -547,7 +488,7 @@ impl Machine {
 impl Machine {
     pub fn page_map(&self) -> String {
         let mut buf = String::new();
-        self.page_map_rec(&mut buf, 1, self.cr3, VirtAddr(0));
+        self.page_map_rec(&mut buf, 1, self.cr3, VirtAddr::from_bits(0));
         buf
     }
     fn num_mapped_entries(&self, table_location: PhysAddr) -> usize {
@@ -681,7 +622,7 @@ fn main() {
     let mut allocator = 99;
     let mut next_page = || {
         allocator += 1;
-        PhysAddr(4096 * allocator)
+        PhysAddr::from_bits(4096 * allocator)
     };
 
     let mut mmu = Machine {
@@ -797,25 +738,25 @@ fn main() {
             target: next_page(),
         },
         InvalidateTlb,
-        Read(VirtAddr(0x50000000000)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x1000000c8000)),
-        Read(VirtAddr(0x1000000c8000 + 64)),
-        Read(VirtAddr(0x1000000c8000 + 2 * 64)),
-        Read(VirtAddr(0x1000000c8100)),
-        Read(VirtAddr(0x1000000c8200)),
-        Read(VirtAddr(0x1000000c9000)),
-        Read(VirtAddr(0x1000000ca000)),
-        Read(VirtAddr(0x1000000cb000)),
-        Read(VirtAddr(0x1000000cc000)),
-        Read(VirtAddr(0x1000000cd000)),
-        Read(VirtAddr(0x1000000ce000)),
-        Read(VirtAddr(0x1000000cf000)),
+        Read(VirtAddr::from_bits(0x50000000000)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x50000202200)),
+        Read(VirtAddr::from_bits(0x1000000c8000)),
+        Read(VirtAddr::from_bits(0x1000000c8000 + 64)),
+        Read(VirtAddr::from_bits(0x1000000c8000 + 2 * 64)),
+        Read(VirtAddr::from_bits(0x1000000c8100)),
+        Read(VirtAddr::from_bits(0x1000000c8200)),
+        Read(VirtAddr::from_bits(0x1000000c9000)),
+        Read(VirtAddr::from_bits(0x1000000ca000)),
+        Read(VirtAddr::from_bits(0x1000000cb000)),
+        Read(VirtAddr::from_bits(0x1000000cc000)),
+        Read(VirtAddr::from_bits(0x1000000cd000)),
+        Read(VirtAddr::from_bits(0x1000000ce000)),
+        Read(VirtAddr::from_bits(0x1000000cf000)),
         DumpStats,
     ];
 
