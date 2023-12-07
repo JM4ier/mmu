@@ -353,49 +353,6 @@ impl Machine {
     }
 }
 
-#[derive(Copy, Clone)]
-pub enum Action {
-    Map {
-        table: PhysAddr,
-        index: usize,
-        target: PhysAddr,
-    },
-    UnMap {
-        table: PhysAddr,
-        index: usize,
-    },
-    InvalidateTlb,
-    Read(VirtAddr),
-    DumpStats,
-}
-
-impl Machine {
-    pub fn run_one(&mut self, action: Action) {
-        match action {
-            Action::Map {
-                table,
-                index,
-                target,
-            } => {
-                self.map_page(table, index, target);
-            }
-            Action::UnMap { table, index } => self.unmap_page(table, index),
-            Action::Read(addr) => {
-                let _ = self.read(addr);
-            }
-            Action::DumpStats => {
-                self.dump_stats();
-            }
-            Action::InvalidateTlb => self.invalidate_tlb(),
-        }
-    }
-    pub fn run_many(&mut self, actions: &[Action]) {
-        for action in actions {
-            self.run_one(*action);
-        }
-    }
-}
-
 fn main() {
     let mut allocator = 99;
     let mut next_frame = || {
