@@ -1,5 +1,5 @@
 use std::{
-    fmt::{write, Display},
+    fmt::{format, write, Display},
     ops::{Add, Deref, DerefMut, Index, IndexMut},
 };
 
@@ -261,9 +261,6 @@ impl Tlb {
             sets: [[TlbEntry::invalid(); 4]; 128],
         }
     }
-    pub fn invalidate(&mut self) {
-        *self = Self::empty();
-    }
 }
 
 impl Display for Tlb {
@@ -337,12 +334,37 @@ impl Stats {
     }
 }
 
+struct Log {
+    enable: bool,
+    depth: usize,
+}
+impl Log {
+    pub fn new() -> Self {
+        Self {
+            enable: true,
+            depth: 0,
+        }
+    }
+    pub fn log(&self, msg: impl ToString) {
+        if self.enable {
+            println!("{}{}", "  ".repeat(self.depth), msg.to_string());
+        }
+    }
+    pub fn begin_context(&mut self) {
+        self.depth += 1;
+    }
+    pub fn end_context(&mut self) {
+        self.depth -= 1;
+    }
+}
+
 pub struct Machine {
     cr3: PhysAddr,
     tlb: Tlb,
     memory: Memory,
     cache: L1dCache,
     stats: Stats,
+    log: Log,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -359,11 +381,13 @@ impl Machine {
             if tlb_set[i].tag == tlb_tag && tlb_set[i].valid {
                 tlb_set[i].mark_accessed();
                 self.stats.tlb.hit();
+                self.log.log("TLB Hit");
                 return Ok(tlb_set[i].addr.with_offset(page_offset));
             }
         }
 
         self.stats.tlb.miss();
+        self.log.log("TLB Miss");
 
         self.stats.page_faults += 1;
 
@@ -418,11 +442,18 @@ impl Machine {
             tlb_set[i].access = 0;
         }
 
+        if tlb_set[k].valid {
+            let evicted = VirtAddr((tlb_set[k].tag | tlb_index) << 12);
+            self.log.log(format!("Evicting TLB Entry {evicted}"));
+        }
+
         // replace old entry
         tlb_set[k].valid = true;
         tlb_set[k].addr = phys_addr;
         tlb_set[k].tag = tlb_tag;
         tlb_set[k].mark_accessed();
+
+        self.log.log(format!("New TLB Entry: {virt_addr}"));
 
         Ok(phys_addr.with_offset(page_offset))
     }
@@ -438,11 +469,13 @@ impl Machine {
         for i in 0..8 {
             if cache_set[i].valid && cache_set[i].tag == tag {
                 self.stats.l1.hit();
+                self.log.log("Cache Hit");
                 return cache_set[i].line[offset];
             }
         }
 
         self.stats.l1.miss();
+        self.log.log("Cache Miss");
 
         // none is the value we need
         // --> evict some entry
@@ -455,20 +488,38 @@ impl Machine {
             }
         }
 
+        if cache_set[k].valid {
+            let evicted = PhysAddr(cache_set[k].tag << 12 | (index as u64) << 6);
+            self.log.log(format!("Evicting L1 Entry: {evicted}"));
+        }
+
         let block_addr = PhysAddr(addr.0 & !63);
 
         cache_set[k].valid = true;
         cache_set[k].tag = tag;
         cache_set[k].line = self.memory.read(block_addr);
 
+        self.log.log(format!("Loaded {block_addr} into cache."));
+
         cache_set[k].line[offset]
     }
 
     pub fn read(&mut self, addr: VirtAddr) -> Result<u8, PageFault> {
+        self.log.log(format!("Memory Access at {addr}"));
+        self.log.begin_context();
+
         let phys_addr = self.translate(addr)?;
-        println!("reading {addr} = {phys_addr}");
+        self.log.log(format!("Found physical address {phys_addr}"));
+
         let byte = self.read_phys(phys_addr);
+
+        self.log.end_context();
         Ok(byte)
+    }
+
+    pub fn invalidate_tlb(&mut self) {
+        self.log.log("Invalidate TLB");
+        self.tlb = Tlb::empty();
     }
 
     pub fn map_page(
@@ -477,15 +528,17 @@ impl Machine {
         table_entry: usize,
         target_frame: PhysAddr,
     ) {
+        self.log.log(format!("Page-Table Edit at address {table_location}: Mapping entry {table_entry:03} to {target_frame}"));
         let table = self.memory.mutate::<PageTable>(table_location);
         table[table_entry] = PageTableEntry::new_present(target_frame);
-        self.tlb.invalidate();
     }
 
     pub fn unmap_page(&mut self, table_location: PhysAddr, table_entry: usize) {
+        self.log.log(format!(
+            "Page-Table Edit at address {table_location}: Unmapping entry {table_entry:03}"
+        ));
         let table = self.memory.mutate::<PageTable>(table_location);
         table[table_entry] = PageTableEntry::new_unmapped();
-        self.tlb.invalidate();
     }
 }
 
@@ -591,6 +644,7 @@ pub enum Action {
         table: PhysAddr,
         index: usize,
     },
+    InvalidateTlb,
     Read(VirtAddr),
     DumpStats,
 }
@@ -611,6 +665,7 @@ impl Machine {
             Action::DumpStats => {
                 self.dump_stats();
             }
+            Action::InvalidateTlb => self.invalidate_tlb(),
         }
     }
     pub fn run_many(&mut self, actions: &[Action]) {
@@ -633,6 +688,7 @@ fn main() {
         memory: Memory::megabytes(200),
         cache: L1dCache::empty(),
         stats: Stats::new(),
+        log: Log::new(),
     };
 
     let p1 = next_page();
@@ -738,25 +794,26 @@ fn main() {
             index: 207,
             target: next_page(),
         },
-        //Read(VirtAddr(0x50000000000)),
-        //Read(VirtAddr(0x50000202200)),
-        //Read(VirtAddr(0x50000202200)),
-        //Read(VirtAddr(0x50000202200)),
-        //Read(VirtAddr(0x50000202200)),
-        //Read(VirtAddr(0x50000202200)),
-        //Read(VirtAddr(0x50000202200)),
+        InvalidateTlb,
+        Read(VirtAddr(0x50000000000)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x50000202200)),
         Read(VirtAddr(0x1000000c8000)),
         Read(VirtAddr(0x1000000c8000 + 64)),
-        Read(VirtAddr(0x1000000c8000 + 2*64)),
-        //Read(VirtAddr(0x1000000c8100)),
-        //Read(VirtAddr(0x1000000c8200)),
-        //Read(VirtAddr(0x1000000c9000)),
-        //Read(VirtAddr(0x1000000ca000)),
-        //Read(VirtAddr(0x1000000cb000)),
-        //Read(VirtAddr(0x1000000cc000)),
-        //Read(VirtAddr(0x1000000cd000)),
-        //Read(VirtAddr(0x1000000ce000)),
-        //Read(VirtAddr(0x1000000cf000)),
+        Read(VirtAddr(0x1000000c8000 + 2 * 64)),
+        Read(VirtAddr(0x1000000c8100)),
+        Read(VirtAddr(0x1000000c8200)),
+        Read(VirtAddr(0x1000000c9000)),
+        Read(VirtAddr(0x1000000ca000)),
+        Read(VirtAddr(0x1000000cb000)),
+        Read(VirtAddr(0x1000000cc000)),
+        Read(VirtAddr(0x1000000cd000)),
+        Read(VirtAddr(0x1000000ce000)),
+        Read(VirtAddr(0x1000000cf000)),
         DumpStats,
     ];
 
