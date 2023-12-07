@@ -1,5 +1,5 @@
 use std::{
-    fmt::Display,
+    fmt::{write, Display},
     ops::{Add, Deref, DerefMut, Index, IndexMut},
 };
 
@@ -11,6 +11,14 @@ impl Display for PhysAddr {
     }
 }
 impl PhysAddr {
+    pub fn from_frame_offset(frame: u64, offset: u64) -> Self {
+        Self((frame << 12) | offset)
+    }
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.0 &= !4095;
+        self.0 |= offset & 4095;
+        self
+    }
     pub const fn frame_offset(self) -> usize {
         self.0 as usize & 4095
     }
@@ -109,6 +117,13 @@ pub struct L1dCacheEntry {
 pub struct L1dCacheSet {
     entries: [L1dCacheEntry; 8],
 }
+
+impl L1dCacheSet {
+    fn has_entry(&self) -> bool {
+        self.entries.iter().any(|e| e.valid)
+    }
+}
+
 impl Index<usize> for L1dCacheSet {
     type Output = L1dCacheEntry;
 
@@ -147,6 +162,22 @@ impl L1dCache {
         Self {
             entries: [L1dCacheSet::empty(); 64],
         }
+    }
+    pub fn display(&self) -> String {
+        let mut buf = String::new();
+        for i in 0..64 {
+            if self.entries[i].has_entry() {
+                buf += &format!("{i:02}:");
+                for e in self.entries[i].entries.iter() {
+                    if e.valid {
+                        let phys = PhysAddr::from_frame_offset(e.tag, (i as u64) << 6);
+                        buf += &format!(" {phys}");
+                    }
+                }
+                buf += "\n";
+            }
+        }
+        buf
     }
 }
 
@@ -239,15 +270,23 @@ impl Display for Tlb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut empty = true;
 
-        for set in self.sets {
+        for (i, set) in self.sets.iter().enumerate() {
             if set.iter().any(|e| e.valid) {
+                let mut first = true;
                 for entry in set.iter() {
                     if entry.valid {
                         empty = false;
+                        if !first {
+                            write!(f, " ")?;
+                        }
+                        first = false;
+
+                        let virt = (entry.tag | i as u64) << 12;
+
                         write!(
                             f,
-                            "[{} -> {}, {}] ",
-                            VirtAddr(entry.tag),
+                            "[{} -> {}, {}]",
+                            VirtAddr(virt),
                             entry.addr,
                             entry.access
                         )?;
@@ -384,7 +423,7 @@ impl Machine {
         tlb_set[k].tag = tlb_tag;
         tlb_set[k].mark_accessed();
 
-        Ok(phys_addr)
+        Ok(phys_addr.with_offset(virt_addr.page_offset()))
     }
 
     pub fn read_phys(&mut self, addr: PhysAddr) -> u8 {
@@ -497,6 +536,7 @@ impl Machine {
     fn dump_stats(&mut self) {
         println!("{}", boxed("Pages", &self.page_map()));
         println!("{}", boxed("TLB", &format!("{}", self.tlb)));
+        println!("{}", boxed("L1-Cache", &self.cache.display()));
         println!("{}", boxed("Stats", &self.stats()));
         self.stats.reset();
     }
@@ -533,7 +573,7 @@ fn boxed(title: &str, content: &str) -> String {
     for _ in 0..=width {
         buf += "─";
     }
-    buf += "╯\n";
+    buf += "╯";
 
     buf
 }
@@ -599,6 +639,9 @@ fn main() {
     let p4 = next_page();
     let p5 = next_page();
     let p6 = next_page();
+    let p7 = next_page();
+    let p8 = next_page();
+    let p9 = next_page();
 
     use Action::*;
     let actions = [
@@ -640,13 +683,78 @@ fn main() {
         },
         Map {
             table: mmu.cr3,
-            index: 24,
+            index: 32,
+            target: p7,
+        },
+        Map {
+            table: p7,
+            index: 0,
+            target: p8,
+        },
+        Map {
+            table: p8,
+            index: 0,
+            target: p9,
+        },
+        Map {
+            table: p9,
+            index: 200,
             target: next_page(),
         },
-        Read(VirtAddr(0x50000000000)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
-        Read(VirtAddr(0x50000202200)),
+        Map {
+            table: p9,
+            index: 201,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 202,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 203,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 204,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 205,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 206,
+            target: next_page(),
+        },
+        Map {
+            table: p9,
+            index: 207,
+            target: next_page(),
+        },
+        //Read(VirtAddr(0x50000000000)),
+        //Read(VirtAddr(0x50000202200)),
+        //Read(VirtAddr(0x50000202200)),
+        //Read(VirtAddr(0x50000202200)),
+        //Read(VirtAddr(0x50000202200)),
+        //Read(VirtAddr(0x50000202200)),
+        //Read(VirtAddr(0x50000202200)),
+        Read(VirtAddr(0x1000000c8000)),
+        Read(VirtAddr(0x1000000c8100)),
+        Read(VirtAddr(0x1000000c8200)),
+        Read(VirtAddr(0x1000000c8000 + 64)),
+        Read(VirtAddr(0x1000000c8000 + 2*64)),
+        Read(VirtAddr(0x1000000c9000)),
+        Read(VirtAddr(0x1000000ca000)),
+        Read(VirtAddr(0x1000000cb000)),
+        Read(VirtAddr(0x1000000cc000)),
+        Read(VirtAddr(0x1000000cd000)),
+        Read(VirtAddr(0x1000000ce000)),
+        Read(VirtAddr(0x1000000cf000)),
         DumpStats,
     ];
 
