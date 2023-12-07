@@ -353,12 +353,13 @@ impl Machine {
         let tlb_index = virt_addr.virtual_page_number() & 127;
         let tlb_tag = (virt_addr.virtual_page_number() >> 7) << 7;
         let tlb_set = &mut self.tlb[tlb_index];
+        let page_offset = virt_addr.page_offset();
 
         for i in 0..4 {
             if tlb_set[i].tag == tlb_tag && tlb_set[i].valid {
                 tlb_set[i].mark_accessed();
                 self.stats.tlb.hit();
-                return Ok(tlb_set[i].addr);
+                return Ok(tlb_set[i].addr.with_offset(page_offset));
             }
         }
 
@@ -423,7 +424,7 @@ impl Machine {
         tlb_set[k].tag = tlb_tag;
         tlb_set[k].mark_accessed();
 
-        Ok(phys_addr.with_offset(virt_addr.page_offset()))
+        Ok(phys_addr.with_offset(page_offset))
     }
 
     pub fn read_phys(&mut self, addr: PhysAddr) -> u8 {
@@ -465,6 +466,7 @@ impl Machine {
 
     pub fn read(&mut self, addr: VirtAddr) -> Result<u8, PageFault> {
         let phys_addr = self.translate(addr)?;
+        println!("reading {addr} = {phys_addr}");
         let byte = self.read_phys(phys_addr);
         Ok(byte)
     }
@@ -744,17 +746,17 @@ fn main() {
         //Read(VirtAddr(0x50000202200)),
         //Read(VirtAddr(0x50000202200)),
         Read(VirtAddr(0x1000000c8000)),
-        Read(VirtAddr(0x1000000c8100)),
-        Read(VirtAddr(0x1000000c8200)),
         Read(VirtAddr(0x1000000c8000 + 64)),
         Read(VirtAddr(0x1000000c8000 + 2*64)),
-        Read(VirtAddr(0x1000000c9000)),
-        Read(VirtAddr(0x1000000ca000)),
-        Read(VirtAddr(0x1000000cb000)),
-        Read(VirtAddr(0x1000000cc000)),
-        Read(VirtAddr(0x1000000cd000)),
-        Read(VirtAddr(0x1000000ce000)),
-        Read(VirtAddr(0x1000000cf000)),
+        //Read(VirtAddr(0x1000000c8100)),
+        //Read(VirtAddr(0x1000000c8200)),
+        //Read(VirtAddr(0x1000000c9000)),
+        //Read(VirtAddr(0x1000000ca000)),
+        //Read(VirtAddr(0x1000000cb000)),
+        //Read(VirtAddr(0x1000000cc000)),
+        //Read(VirtAddr(0x1000000cd000)),
+        //Read(VirtAddr(0x1000000ce000)),
+        //Read(VirtAddr(0x1000000cf000)),
         DumpStats,
     ];
 
