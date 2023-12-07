@@ -163,21 +163,22 @@ impl L1dCache {
             entries: [L1dCacheSet::empty(); 64],
         }
     }
-    pub fn display(&self) -> String {
-        let mut buf = String::new();
+}
+impl Display for L1dCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for i in 0..64 {
             if self.entries[i].has_entry() {
-                buf += &format!("{i:02}:");
+                write!(f, "{i:02}:")?;
                 for e in self.entries[i].entries.iter() {
                     if e.valid {
                         let phys = PhysAddr::from_frame_offset(e.tag, (i as u64) << 6);
-                        buf += &format!(" {phys}");
+                        write!(f, " {phys}")?;
                     }
                 }
-                buf += "\n";
+                writeln!(f)?;
             }
         }
-        buf
+        Ok(())
     }
 }
 
@@ -590,14 +591,15 @@ impl Machine {
     }
     fn dump_stats(&mut self) {
         println!("{}", boxed("Pages", &self.page_map()));
-        println!("{}", boxed("TLB", &format!("{}", self.tlb)));
-        println!("{}", boxed("L1-Cache", &self.cache.display()));
+        println!("{}", boxed("TLB", &self.tlb));
+        println!("{}", boxed("L1-Cache", &self.cache));
         println!("{}", boxed("Stats", &self.stats()));
         self.stats.reset();
     }
 }
 
-fn boxed(title: &str, content: &str) -> String {
+fn boxed(title: &str, content: impl Display) -> String {
+    let content = format!("{}", content);
     let lines: Vec<_> = content.lines().collect();
     let width = lines
         .iter()
