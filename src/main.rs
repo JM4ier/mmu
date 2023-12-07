@@ -1,52 +1,24 @@
-use std::{
-    fmt::Display,
-    ops::{Add, Deref, DerefMut, Index, IndexMut},
-};
+use std::ops::{Index, IndexMut};
 
-pub mod addr;
+mod addr;
 use addr::{PhysAddr, VirtAddr};
-pub mod cli;
 
-#[derive(Copy, Clone)]
-pub struct PageTableEntry {
-    bits: u64,
-}
+mod page;
+use page::{PageTable, PageTableEntry};
 
-impl PageTableEntry {
-    pub const fn new_present(target: PhysAddr) -> Self {
-        Self {
-            bits: target.bits() & 0x000FFFFFFFFFFFF000 | 1,
-        }
-    }
+mod memory;
+use memory::Memory;
 
-    pub const fn new_unmapped() -> Self {
-        Self { bits: 0 }
-    }
+mod log;
+use log::Log;
 
-    pub const fn is_present(self) -> bool {
-        self.bits & 1 > 0
-    }
+mod cli;
 
-    pub const fn phys_addr(self) -> PhysAddr {
-        PhysAddr::from_bits(self.bits & 0x000FFFFFFFFFFFF000)
-    }
-}
+mod draw;
+use draw::{Draw, MachineDraw};
+use stat::Stats;
 
-#[derive(Copy, Clone)]
-pub struct PageTable {
-    table: [PageTableEntry; 512],
-}
-impl Deref for PageTable {
-    type Target = [PageTableEntry; 512];
-    fn deref(&self) -> &Self::Target {
-        &self.table
-    }
-}
-impl DerefMut for PageTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.table
-    }
-}
+mod stat;
 
 #[derive(Copy, Clone)]
 pub struct L1dCacheEntry {
@@ -79,6 +51,11 @@ impl IndexMut<usize> for L1dCacheSet {
     }
 }
 
+/// An L1 Data Cache:
+/// - 32KB in size
+/// - 64 sets
+/// - 8-way associative
+/// - 64 bytes per block
 pub struct L1dCache {
     entries: [L1dCacheSet; 64],
 }
@@ -106,59 +83,6 @@ impl L1dCache {
         }
     }
 }
-impl Display for L1dCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for i in 0..64 {
-            if self.entries[i].has_entry() {
-                write!(f, "{i:02}:")?;
-                for e in self.entries[i].entries.iter() {
-                    if e.valid {
-                        let phys = PhysAddr::from_frame_offset(e.tag, (i as u64) << 6);
-                        write!(f, " {phys}")?;
-                    }
-                }
-                writeln!(f)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-pub struct Memory {
-    memory: Vec<u8>,
-}
-
-impl Memory {
-    fn megabytes(mb: usize) -> Self {
-        Self {
-            memory: vec![0; mb << 20],
-        }
-    }
-    fn read<T: Copy>(&self, addr: PhysAddr) -> T {
-        let a = addr.bits() as usize;
-        let len = core::mem::size_of::<T>();
-
-        if a + len > self.memory.len() {
-            panic!("memory access out of bounds...");
-        }
-
-        let addr = (&self.memory[a]) as *const u8 as *const T;
-
-        unsafe { *addr }
-    }
-    fn mutate<T>(&mut self, addr: PhysAddr) -> &mut T {
-        let a = addr.bits() as usize;
-        let len = core::mem::size_of::<T>();
-
-        if a + len > self.memory.len() {
-            panic!("memory access out of bounds...");
-        }
-
-        let addr = (&mut self.memory[a]) as *mut u8 as *mut T;
-
-        unsafe { addr.as_mut().unwrap() }
-    }
-}
 
 #[derive(Copy, Clone)]
 pub struct TlbEntry {
@@ -167,11 +91,13 @@ pub struct TlbEntry {
     tag: u64,
     addr: PhysAddr,
 }
+
 impl TlbEntry {
     pub fn mark_accessed(&mut self) {
         self.access = self.access.saturating_add(1);
     }
-    pub const fn invalid() -> Self {
+
+    pub const fn new() -> Self {
         Self {
             valid: false,
             access: 0,
@@ -201,103 +127,8 @@ impl IndexMut<u64> for Tlb {
 impl Tlb {
     pub const fn empty() -> Self {
         Self {
-            sets: [[TlbEntry::invalid(); 4]; 128],
+            sets: [[TlbEntry::new(); 4]; 128],
         }
-    }
-}
-
-impl Display for Tlb {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut empty = true;
-
-        for (i, set) in self.sets.iter().enumerate() {
-            if set.iter().any(|e| e.valid) {
-                let mut first = true;
-                for entry in set.iter() {
-                    if entry.valid {
-                        empty = false;
-                        if !first {
-                            write!(f, " ")?;
-                        }
-                        first = false;
-
-                        let virt = (entry.tag | i as u64) << 12;
-
-                        write!(
-                            f,
-                            "[{} -> {}, {}]",
-                            VirtAddr::from_bits(virt),
-                            entry.addr,
-                            entry.access
-                        )?;
-                    }
-                }
-                write!(f, "\n")?;
-            }
-        }
-
-        if empty {
-            write!(f, "(empty)")?;
-        }
-        Ok(())
-    }
-}
-
-pub struct CacheStats {
-    hit: usize,
-    miss: usize,
-}
-impl CacheStats {
-    fn new() -> Self {
-        Self { hit: 0, miss: 0 }
-    }
-    fn hit(&mut self) {
-        self.hit += 1;
-    }
-    fn miss(&mut self) {
-        self.miss += 1;
-    }
-}
-
-pub struct Stats {
-    page_faults: usize,
-    l1: CacheStats,
-    tlb: CacheStats,
-}
-impl Stats {
-    fn new() -> Self {
-        Self {
-            page_faults: 0,
-            l1: CacheStats::new(),
-            tlb: CacheStats::new(),
-        }
-    }
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-}
-
-struct Log {
-    enable: bool,
-    depth: usize,
-}
-impl Log {
-    pub fn new() -> Self {
-        Self {
-            enable: true,
-            depth: 0,
-        }
-    }
-    pub fn log(&self, msg: impl ToString) {
-        if self.enable {
-            println!("{}{}", "  ".repeat(self.depth), msg.to_string());
-        }
-    }
-    pub fn begin_context(&mut self) {
-        self.depth += 1;
-    }
-    pub fn end_context(&mut self) {
-        self.depth -= 1;
     }
 }
 
@@ -314,6 +145,7 @@ pub struct Machine {
 pub struct PageFault;
 
 impl Machine {
+    /// simulate an address translation
     pub fn translate(&mut self, virt_addr: VirtAddr) -> Result<PhysAddr, PageFault> {
         let tlb_index = virt_addr.virtual_page_number() & 127;
         let tlb_tag = (virt_addr.virtual_page_number() >> 7) << 7;
@@ -401,6 +233,7 @@ impl Machine {
         Ok(phys_addr.with_offset(page_offset))
     }
 
+    /// simulate an access of physical memory
     pub fn read_phys(&mut self, addr: PhysAddr) -> u8 {
         let offset = addr.frame_offset() & 63;
         let index = (addr.frame_offset() >> 6) & 63;
@@ -447,6 +280,7 @@ impl Machine {
         cache_set[k].line[offset]
     }
 
+    /// simulate an access of virtual memory
     pub fn read(&mut self, addr: VirtAddr) -> Result<u8, PageFault> {
         self.log.log(format!("Memory Access at {addr}"));
         self.log.begin_context();
@@ -460,11 +294,13 @@ impl Machine {
         Ok(byte)
     }
 
+    /// remove all TLB entries
     pub fn invalidate_tlb(&mut self) {
         self.log.log("Invalidate TLB");
         self.tlb = Tlb::empty();
     }
 
+    /// Adds a new mapping to the page table at the given location
     pub fn map_page(
         &mut self,
         table_location: PhysAddr,
@@ -472,54 +308,21 @@ impl Machine {
         target_frame: PhysAddr,
     ) {
         self.log.log(format!("Page-Table Edit at address {table_location}: Mapping entry {table_entry:03} to {target_frame}"));
-        let table = self.memory.mutate::<PageTable>(table_location);
+        let table = self.memory.edit::<PageTable>(table_location);
         table[table_entry] = PageTableEntry::new_present(target_frame);
     }
 
+    /// removes a mapping from the table at the given location
     pub fn unmap_page(&mut self, table_location: PhysAddr, table_entry: usize) {
         self.log.log(format!(
             "Page-Table Edit at address {table_location}: Unmapping entry {table_entry:03}"
         ));
-        let table = self.memory.mutate::<PageTable>(table_location);
+        let table = self.memory.edit::<PageTable>(table_location);
         table[table_entry] = PageTableEntry::new_unmapped();
     }
 }
 
-// pretty printing
-impl Machine {
-    pub fn page_map(&self) -> String {
-        let mut buf = String::new();
-        self.page_map_rec(&mut buf, 1, self.cr3, VirtAddr::from_bits(0));
-        buf
-    }
-    fn num_mapped_entries(&self, table_location: PhysAddr) -> usize {
-        let table = self.memory.read::<PageTable>(table_location);
-        table.iter().filter(|e| e.is_present()).count()
-    }
-    fn page_map_rec(&self, buf: &mut String, depth: i32, phys_base: PhysAddr, virt_base: VirtAddr) {
-        let table = self.memory.read::<PageTable>(phys_base);
-
-        let indent = " | ".repeat(depth as usize - 1);
-        let stride = 4096 << (9 * (4 - depth));
-
-        for (i, entry) in table.iter().enumerate() {
-            if !entry.is_present() {
-                continue;
-            }
-
-            let virt = virt_base + stride * i as u64;
-            let phys = entry.phys_addr();
-            if depth == 4 {
-                *buf += &(format!("{indent}{i:03}: {virt} -> {phys}\n"));
-            } else {
-                let x = self.num_mapped_entries(phys);
-                *buf += &format!("{indent}{i:03}: [{x} mapped entries]\n");
-                self.page_map_rec(buf, depth + 1, phys, virt);
-            }
-        }
-    }
-}
-
+// stats
 impl Machine {
     fn stats(&self) -> String {
         format!(
@@ -531,10 +334,11 @@ impl Machine {
             self.stats.page_faults
         )
     }
+
     fn dump_stats(&mut self) {
-        cli::print_box("Pages", self.page_map());
-        cli::print_box("TLB", &self.tlb);
-        cli::print_box("L1-Cache", &self.cache);
+        cli::print_box("Pages", self.draw_page_map());
+        cli::print_box("TLB", self.tlb.draw());
+        cli::print_box("L1-Cache", self.cache.draw());
         cli::print_box("Stats", self.stats());
         self.stats.reset();
     }
@@ -555,6 +359,7 @@ pub enum Action {
     Read(VirtAddr),
     DumpStats,
 }
+
 impl Machine {
     pub fn run_one(&mut self, action: Action) {
         match action {
@@ -567,7 +372,9 @@ impl Machine {
             }
             Action::UnMap { table, index } => self.unmap_page(table, index),
             Action::Read(addr) => {
-                self.read(addr);
+                if self.read(addr).is_err() {
+                    self.log.log(format!("Page Fault while accessing {addr}"));
+                }
             }
             Action::DumpStats => {
                 self.dump_stats();
