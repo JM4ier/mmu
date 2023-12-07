@@ -109,6 +109,10 @@ impl TlbEntry {
 
 pub type TlbEntrySet = [TlbEntry; 4];
 
+
+/// A Translation Lookaside Buffer - basically a small cache for address translations
+/// - 128 sets
+/// - 4-way associative
 pub struct Tlb {
     sets: [TlbEntrySet; 128],
 }
