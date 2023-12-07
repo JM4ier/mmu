@@ -2,7 +2,12 @@
 
 This  is a basic simulator for virtual memory on X86_64.
 
-It is loosely based on the Sandy Bridge MMU, as described [here](https://www.realworldtech.com/sandy-bridge/7/)
+It is loosely based on the Sandy Bridge memory subsystem, as described [here](https://www.realworldtech.com/sandy-bridge/7/)
+
+The main goal was to precisely write down what happens when accessing memory, to be used as learning material.
+The relevant file to look at in that case would be `src/main.rs`.
+
+It can also be used to simulate paging & memory accesses, which is a nice bonus.
 
 ## Usage
 
