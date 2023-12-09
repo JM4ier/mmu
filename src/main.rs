@@ -23,6 +23,7 @@ mod stat;
 #[derive(Copy, Clone)]
 pub struct L1dCacheEntry {
     valid: bool,
+    lru: u8,
     tag: u64,
     line: [u8; 64],
 }
@@ -35,6 +36,19 @@ pub struct L1dCacheSet {
 impl L1dCacheSet {
     fn has_entry(&self) -> bool {
         self.entries.iter().any(|e| e.valid)
+    }
+
+    /// Updates the LRU counters to reflect the order of least recent accesses
+    fn update_lru(&mut self, k: usize) {
+        let previous_lru = self.entries[k].lru;
+
+        for i in 0..8 {
+            if self.entries[i].lru > previous_lru {
+                self.entries[i].lru -= 1;
+            }
+        }
+
+        self.entries[k].lru = 8;
     }
 }
 
@@ -64,6 +78,7 @@ impl L1dCacheEntry {
     pub const fn empty() -> Self {
         Self {
             valid: false,
+            lru: 0,
             tag: 0,
             line: [0; 64],
         }
@@ -252,6 +267,7 @@ impl Machine {
             if cache_set[i].valid && cache_set[i].tag == tag {
                 self.stats.l1.hit();
                 self.log.log("Cache Hit");
+                cache_set.update_lru(i);
                 return cache_set[i].line[offset];
             }
         }
@@ -259,13 +275,11 @@ impl Machine {
         self.stats.l1.miss();
         self.log.log("Cache Miss");
 
-        // none is the value we need
-        // --> evict some entry
-        // TODO: better eviction strategy
 
+        // Eviction using LRU policy
         let mut k = 0;
         for i in 0..8 {
-            if !cache_set[i].valid {
+            if !cache_set[i].valid || cache_set[i].lru < cache_set[k].lru {
                 k = i;
             }
         }
@@ -280,6 +294,7 @@ impl Machine {
         cache_set[k].valid = true;
         cache_set[k].tag = tag;
         cache_set[k].line = self.memory.read(block_addr);
+        cache_set.update_lru(k);
 
         self.log.log(format!("Loaded {block_addr} into cache."));
 
