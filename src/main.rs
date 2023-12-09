@@ -87,20 +87,16 @@ impl L1dCache {
 #[derive(Copy, Clone)]
 pub struct TlbEntry {
     valid: bool,
-    access: u8,
+    lru: u8,
     tag: u64,
     addr: PhysAddr,
 }
 
 impl TlbEntry {
-    pub fn mark_accessed(&mut self) {
-        self.access = self.access.saturating_add(1);
-    }
-
     pub const fn new() -> Self {
         Self {
             valid: false,
-            access: 0,
+            lru: 0,
             tag: 0,
             addr: PhysAddr::from_bits(0),
         }
@@ -157,7 +153,15 @@ impl Machine {
 
         for i in 0..4 {
             if tlb_set[i].tag == tlb_tag && tlb_set[i].valid {
-                tlb_set[i].mark_accessed();
+                let previous_lru = tlb_set[i].lru;
+                tlb_set[i].lru = 4;
+
+                for k in 0..4 {
+                    if i != k && tlb_set[k].lru > previous_lru {
+                        tlb_set[k].lru -= 1;
+                    }
+                }
+
                 self.stats.tlb.hit();
                 self.log.log("TLB Hit");
                 return Ok(tlb_set[i].addr.with_offset(page_offset));
@@ -205,15 +209,10 @@ impl Machine {
                 break;
             }
 
-            // choose entry with least accesses
-            if tlb_set[i].access < tlb_set[k].access {
+            // choose entry based on LRU policy
+            if tlb_set[i].lru < tlb_set[k].lru {
                 k = i;
             }
-        }
-
-        for i in 0..4 {
-            // reset access counter
-            tlb_set[i].access = 0;
         }
 
         if tlb_set[k].valid {
@@ -225,7 +224,15 @@ impl Machine {
         tlb_set[k].valid = true;
         tlb_set[k].addr = phys_addr;
         tlb_set[k].tag = tlb_tag;
-        tlb_set[k].mark_accessed();
+
+        let previous_lru = tlb_set[k].lru;
+        tlb_set[k].lru = 4;
+
+        for i in 0..4 {
+            if i != k && tlb_set[i].lru > previous_lru {
+                tlb_set[i].lru -= 1;
+            }
+        }
 
         self.log.log(format!("New TLB Entry: {virt_addr}"));
 

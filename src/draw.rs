@@ -32,7 +32,7 @@ impl Draw for Tlb {
                             "[{} -> {}, {}]",
                             VirtAddr::from_bits(virt),
                             entry.addr,
-                            entry.access
+                            entry.lru
                         );
                     }
                 }
